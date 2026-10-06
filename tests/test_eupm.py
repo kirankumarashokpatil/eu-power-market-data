@@ -1,6 +1,6 @@
 """ENTSO-E parser and EU analytics tests, using hand-built XML in the real API's format."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 import numpy as np
 import polars as pl
@@ -151,7 +151,7 @@ def test_atlas_ranks_zones_and_values_are_positive():
     frames = make_synthetic_eu(["DE_LU", "BE"], days=10)
     summary, daily = arbitrage_atlas(frames)
     assert set(summary["zone"]) == {"DE_LU", "BE"}
-    assert daily.height == 20
+    assert daily.height == 18  # 10 UTC days = 9 full CET days per zone
     assert (daily["bess_value"] >= -1e-6).all()  # perfect foresight never loses money
     corr = price_correlation(frames)
     assert np.isclose(corr.filter(pl.col("zone") == "BE")["BE"][0], 1.0)
@@ -191,3 +191,30 @@ def test_backtest_smoke():
     res = run_eu_backtest(make_synthetic_eu(["FR"], days=45)["FR"], s)
     assert set(res.summary["model"]) == {"LightGBM", "XGBoost", "Seasonal naive"}
     assert res.predictions.height == 3 * 2 * 24
+
+
+def test_days_are_market_days_with_dst():
+    from eupm.analytics import _full_days
+
+    df = make_synthetic_eu(["DE_LU"], days=320)["DE_LU"]  # 2024: covers both DST switches
+    full = _full_days(df)
+    first_hour = (
+        full.group_by("day")
+        .agg(pl.col("start_time").min())
+        .with_columns(
+            pl.col("start_time").dt.convert_time_zone("Europe/Brussels").dt.hour().alias("h")
+        )
+    )
+    assert (first_hour["h"] == 0).all()  # every day starts at local midnight, not UTC
+    sizes = dict(full.group_by("day").len().iter_rows())
+    assert sizes[date(2024, 3, 31)] == 23  # clocks forward
+    assert sizes[date(2024, 10, 27)] == 25  # clocks back
+
+
+def test_no_lag_reaches_into_the_delivery_day():
+    df = make_synthetic_eu(["DE_LU"], days=320)["DE_LU"]
+    f = eu_features(df).filter(pl.col("price_lag24").is_not_null())
+    local = pl.col("start_time").dt.convert_time_zone("Europe/Brussels")
+    day_start = local.dt.truncate("1d").dt.convert_time_zone("UTC")
+    leaks = f.filter(pl.col("start_time") - timedelta(hours=24) >= day_start)
+    assert leaks.is_empty()

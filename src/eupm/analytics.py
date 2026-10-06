@@ -24,7 +24,7 @@ from eupm.config import BatteryConfig, Settings
 from eupm.models import FeatureModel, LightGBMQuantile, XGBoostQuantile
 
 log = logging.getLogger(__name__)
-HOURS = 24
+MARKET_TZ = "Europe/Brussels"  # SDAC delivery days run 00:00-24:00 CET/CEST
 FUNDAMENTALS = ["load_fc", "solar_fc", "wind_fc", "residual_load_fc"]
 
 
@@ -102,11 +102,15 @@ def quality_report(frames: dict[str, pl.DataFrame]) -> pl.DataFrame:
 # --------------------------------------------------------------------------- atlas
 
 
-def _full_days(df: pl.DataFrame, col: str = "price") -> pl.DataFrame:
-    df = df.filter(pl.col(col).is_not_null()).with_columns(
-        pl.col("start_time").dt.date().alias("day")
-    )
-    ok = df.group_by("day").len().filter(pl.col("len") == HOURS)["day"]
+def _full_days(df: pl.DataFrame, col: str = "price", tz: str = MARKET_TZ) -> pl.DataFrame:
+    """Keep only complete delivery days. A day is the local market day, not the UTC day,
+    so it has 23 hours when clocks go forward and 25 when they go back."""
+    local = pl.col("start_time").dt.convert_time_zone(tz)
+    df = df.filter(pl.col(col).is_not_null()).with_columns(local.dt.date().alias("day"))
+    midnight = local.dt.truncate("1d")
+    hours_in_day = (midnight.dt.offset_by("1d") - midnight).dt.total_hours()
+    counts = df.group_by("day").agg(pl.len(), hours_in_day.first().alias("expected"))
+    ok = counts.filter(pl.col("len") == pl.col("expected"))["day"]
     return df.filter(pl.col("day").is_in(ok.implode())).sort("start_time")
 
 
@@ -133,6 +137,7 @@ def arbitrage_atlas(
                     "spread": float(p.max() - p.min()),
                     "mean_price": float(p.mean()),
                     "neg_hours": int((p < 0).sum()),
+                    "hours": len(p),
                 }
             )
     daily = pl.DataFrame(daily_rows)
@@ -145,7 +150,7 @@ def arbitrage_atlas(
             pl.col("bess_value").mean().alias("avg_daily_value"),
             (pl.col("bess_value").mean() * 365 / cfg.power_mw).alias("value_per_mw_year"),
             pl.col("bess_value").quantile(0.05).alias("p5_daily_value"),
-            (pl.col("neg_hours").sum() / (pl.len() * HOURS) * 100).alias("negative_hours_pct"),
+            (pl.col("neg_hours").sum() / pl.col("hours").sum() * 100).alias("negative_hours_pct"),
         )
         .sort("value_per_mw_year", descending=True)
     )
@@ -170,9 +175,14 @@ def price_correlation(frames: dict[str, pl.DataFrame]) -> pl.DataFrame:
 # --------------------------------------------------------------------------- forecasting
 
 
-def eu_features(df: pl.DataFrame, tz: str = "Europe/Brussels") -> pl.DataFrame:
+def eu_features(df: pl.DataFrame, tz: str = MARKET_TZ) -> pl.DataFrame:
     local = pl.col("start_time").dt.convert_time_zone(tz)
     lags = [24, 48, 168]
+    # A price 24 h back is only known at gate closure if it falls before the delivery day
+    # starts. On the 25-hour autumn DST day, the last hour's 24 h lag lands inside the
+    # same auction, so those features are set to null (and the day drops out below).
+    day_start = local.dt.truncate("1d").dt.convert_time_zone("UTC")
+    known_24h_ago = pl.col("start_time") - pl.duration(hours=24) < day_start
     out = df.sort("start_time").with_columns(
         local.dt.hour().alias("hour"),
         local.dt.weekday().alias("dow"),
@@ -180,10 +190,17 @@ def eu_features(df: pl.DataFrame, tz: str = "Europe/Brussels") -> pl.DataFrame:
         (local.dt.weekday() >= 6).cast(pl.Int8).alias("is_weekend"),
         (2 * math.pi * local.dt.ordinal_day() / 365.25).sin().alias("doy_sin"),
         (2 * math.pi * local.dt.ordinal_day() / 365.25).cos().alias("doy_cos"),
-        *[pl.col("price").shift(lag).alias(f"price_lag{lag}") for lag in lags],
-        pl.col("price").shift(24).rolling_mean(24).alias("price_rmean24"),
-        pl.col("price").shift(24).rolling_mean(168).alias("price_rmean168"),
-        pl.col("price").shift(24).rolling_std(168).alias("price_rstd168"),
+        *[pl.col("price").shift(lag).alias(f"price_lag{lag}") for lag in lags[1:]],
+        pl.when(known_24h_ago).then(pl.col("price").shift(24)).alias("price_lag24"),
+        pl.when(known_24h_ago)
+        .then(pl.col("price").shift(24).rolling_mean(24))
+        .alias("price_rmean24"),
+        pl.when(known_24h_ago)
+        .then(pl.col("price").shift(24).rolling_mean(168))
+        .alias("price_rmean168"),
+        pl.when(known_24h_ago)
+        .then(pl.col("price").shift(24).rolling_std(168))
+        .alias("price_rstd168"),
         (pl.col("residual_load_fc") - pl.col("residual_load_fc").shift(24)).alias("resid_chg24"),
         (pl.col("residual_load_fc") / pl.col("load_fc")).alias("resid_share"),
     )
@@ -195,12 +212,12 @@ def eu_feature_columns(df: pl.DataFrame) -> list[str]:
 
 
 def run_eu_backtest(
-    zone_df: pl.DataFrame, settings: Settings | None = None, tz: str = "Europe/Brussels"
+    zone_df: pl.DataFrame, settings: Settings | None = None, tz: str = MARKET_TZ
 ) -> BacktestResult:
     """Walk-forward day-ahead forecast for one zone. Missing fundamentals are passed to
     the tree models as NaN, which both libraries handle natively."""
     s = settings or Settings()
-    feats = _full_days(eu_features(zone_df, tz))
+    feats = _full_days(eu_features(zone_df, tz), tz=tz)
     cols = eu_feature_columns(feats)
     days = feats["day"].unique(maintain_order=True).to_list()
     bt = s.backtest

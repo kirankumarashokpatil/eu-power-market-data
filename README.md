@@ -49,6 +49,10 @@ The ENTSO-E API has quirks that a market-data platform has to handle correctly:
   HTTP 400). It's treated as an empty result, not an error.
 - **One-year request limits and rate limits**: requests are chunked, retried with
   backoff, and cached as Parquet.
+- **Delivery days are market days, not UTC days.** Data is stored in UTC but grouped
+  into CET/CEST delivery days, so days have 23 or 25 hours at the DST switches. On the
+  25-hour day, the last hour's 24-hour lag would fall inside the same auction, so it is
+  masked. Regression tests cover both.
 - **No leakage.** Forecasts are issued on D-1 before 12:00 CET gate closure. Price lags
   of at least 24 hours are known by then (D-1 prices were published on D-2), and the
   day-ahead load/RES forecasts for D are already public.
