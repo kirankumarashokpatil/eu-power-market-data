@@ -4,5 +4,6 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-data/*.parquet
+data/**/*.parquet
 reports_tmp/
+reports_test/

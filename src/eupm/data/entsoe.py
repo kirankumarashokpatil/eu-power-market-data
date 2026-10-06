@@ -32,12 +32,14 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import requests
 from pydantic import BaseModel, Field, field_validator
 
 BASE_URL = "https://web-api.tp.entsoe.eu/api"
+MARKET_TZ = ZoneInfo("Europe/Brussels")  # SDAC delivery days run 00:00-24:00 CET/CEST
 log = logging.getLogger(__name__)
 
 # Bidding-zone EIC codes (subset; extend as coverage grows)
@@ -194,13 +196,19 @@ def _request(params: dict[str, str], cfg: EntsoeConfig) -> bytes:
     raise RuntimeError(f"ENTSO-E request failed after {cfg.retries} attempts: {params}")
 
 
+def _market_midnight(d: date) -> datetime:
+    """Start of delivery day ``d`` (00:00 CET/CEST), expressed in UTC."""
+    return datetime.combine(d, datetime.min.time(), MARKET_TZ).astimezone(UTC)
+
+
 def _chunks(cfg: EntsoeConfig) -> list[tuple[datetime, datetime]]:
+    """Request windows aligned to whole delivery days, so prices (which ENTSO-E returns
+    per delivery day) and forecasts (cut to the exact window) cover the same hours."""
     out = []
-    cur = datetime.combine(cfg.start, datetime.min.time(), UTC)
-    stop = datetime.combine(cfg.end + timedelta(days=1), datetime.min.time(), UTC)
+    cur, stop = cfg.start, cfg.end + timedelta(days=1)
     while cur < stop:
         nxt = min(cur + timedelta(days=cfg.chunk_days), stop)
-        out.append((cur, nxt))
+        out.append((_market_midnight(cur), _market_midnight(nxt)))
         cur = nxt
     return out
 

@@ -218,3 +218,14 @@ def test_no_lag_reaches_into_the_delivery_day():
     day_start = local.dt.truncate("1d").dt.convert_time_zone("UTC")
     leaks = f.filter(pl.col("start_time") - timedelta(hours=24) >= day_start)
     assert leaks.is_empty()
+
+
+def test_request_windows_follow_delivery_days():
+    from eupm.data.entsoe import _chunks
+
+    winter = _chunks(EntsoeConfig(start=date(2025, 1, 1), end=date(2025, 1, 7)))
+    assert [(a.isoformat(), b.isoformat()) for a, b in winter] == [
+        ("2024-12-31T23:00:00+00:00", "2025-01-07T23:00:00+00:00")
+    ]
+    summer = _chunks(EntsoeConfig(start=date(2025, 7, 1), end=date(2025, 7, 1)))
+    assert summer[0][0].hour == 22  # CEST is UTC+2
