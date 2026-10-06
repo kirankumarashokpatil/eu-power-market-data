@@ -12,7 +12,10 @@ A data and analytics pipeline for **European day-ahead (SDAC) power markets**, b
 4. **Forecasting:** day-ahead price forecasts driven by fundamentals (LightGBM/XGBoost
    quantiles), scored on **battery revenue capture**, not only on error.
 
-<!-- After running on real data, add a screenshot: docs/dashboard.png -->
+**Start here:** [`notebooks/01_walkthrough.ipynb`](notebooks/01_walkthrough.ipynb) walks through
+the results on two years of real ENTSO-E data, with charts and explanations.
+
+![Battery value by zone](docs/atlas.png)
 
 ## Coverage
 
@@ -70,6 +73,8 @@ uv run eupm backtest --zones DE_LU FR ES --test-days 90
 uv run streamlit run app/dashboard.py
 ```
 
+The results in `reports/` are committed, so the dashboard and notebook work without an API key.
+
 Offline demo (synthetic data, clearly flagged in the dashboard, not for results):
 `uv run eupm backtest --synthetic --zones DE_LU FR ES --test-days 14`
 
@@ -78,26 +83,59 @@ Quality checks (also run in GitHub Actions):
 
 ## Results
 
-Fill in after running on real data:
+Real ENTSO-E data, 6 zones, 1 January 2024 to 31 December 2025 (731 delivery days per zone).
+Data quality: 100% price coverage, no gaps or duplicate hours in any zone.
 
-**Arbitrage atlas** (1 MW / 2 MWh, 88% RTE, perfect foresight, hourly)
+**Arbitrage atlas** (1 MW / 2 MWh, 88% RTE, 1.5 cycles/day, perfect foresight, hourly prices)
 
-| Zone | Avg price €/MWh | Avg daily spread | €/MW/year | Negative-price hours |
+| Zone | Avg price €/MWh | Avg daily spread €/MWh | €/MW/year | Negative-price hours |
 |---|---|---|---|---|
-| DE_LU | | | | |
-| ES | | | | |
-| FR | | | | |
+| PL | 100.3 | 132.0 | 77,600 | 2.9% |
+| NL | 82.0 | 118.1 | 71,800 | 5.9% |
+| DE_LU | 83.8 | 113.0 | 68,000 | 4.7% |
+| BE | 76.4 | 101.3 | 60,200 | 5.3% |
+| FR | 59.5 | 83.0 | 50,100 | 4.9% |
+| ES | 64.0 | 84.2 | 48,800 | 4.8% |
 
-**Day-ahead forecast back-test** (90 days)
+**Day-ahead forecast back-test** (walk-forward, last 90 days of 2025, 180-day training window)
 
-| Zone | Model | MAE €/MWh | P10–P90 coverage | Revenue capture |
+| Zone | LightGBM MAE €/MWh | Naive MAE €/MWh | LightGBM revenue capture | Naive revenue capture |
 |---|---|---|---|---|
-| DE_LU | LightGBM | | | |
-| DE_LU | Seasonal naive | | | |
+| DE_LU | 9.9 | 25.6 | 92% | 77% |
+| ES | 10.7 | 19.9 | 90% | 76% |
+| NL | 12.0 | 22.1 | 85% | 73% |
+| FR | 12.6 | 19.3 | 83% | 68% |
+| BE | 11.8 | 19.9 | 81% | 62% |
+| PL | 15.3 | 25.4 | 80% | 59% |
 
-**Findings:** _e.g. which zones have the widest spreads and why (solar share, coupling),
-how much residual load improves on price-only lags, and how negative-price hours have
-grown in solar-heavy zones._
+XGBoost results are within one percentage point of LightGBM in every zone (see the notebook).
+
+![Forecast back-test](docs/backtest.png)
+
+**Findings**
+
+- **Battery value follows the price level.** Daily battery value tracks the daily spread
+  (correlation 0.90–0.98), and the spread is about 1.3–1.4× the average price in every zone.
+  So the ranking is mostly a ranking of price level. Poland is first because coal, lignite and
+  carbon costs make its evening peak expensive. It has the *fewest* negative-price hours of the
+  six: the evening peak pays a battery, not negative prices.
+- **Same daily shape everywhere.** Prices are lowest at 12:00–14:00 and highest at 19:00
+  (21:00 in Spain). This is the solar-shift cycle a 2-hour battery is sized for.
+- **2025 paid more than 2024 in every zone** (+11% to +25%), with wider spreads and more
+  negative-price hours.
+- **Fundamentals beat price history.** Using day-ahead load, wind and solar forecasts, the
+  models roughly halve the error of the seasonal naive baseline and capture 80–92% of
+  perfect-foresight revenue, against 59–77% for the baseline.
+- **Revenue capture tells you more than MAE.** Zones with similar MAE differ by more than 10
+  points in capture, because capture depends on getting the timing of cheap and expensive hours right.
+- **Residual load drives the forecasts.** SHAP values show it as the largest driver, about five
+  times yesterday's price. In the most extreme December hour (a *Dunkelflaute* evening: 70 GW
+  load, 4 GW wind, no solar), it alone added about €100/MWh to the forecast.
+
+![Explaining one forecast](docs/forecast_explained.png)
+
+**Known weakness:** the P10–P90 bands contain only 40–60% of actual prices instead of 80%,
+so the quantile models are overconfident. Conformal calibration is the planned fix.
 
 ## Project layout
 
@@ -111,6 +149,7 @@ src/eupm/
   config.py          pydantic settings
   cli.py             `eupm zones|fetch|atlas|backtest`
 app/dashboard.py     Streamlit dashboard
+notebooks/           walkthrough of the results (imports from src/, no logic of its own)
 tests/               parser fixtures in the real API's XML format, analytics and LP tests
 ```
 
@@ -126,11 +165,16 @@ tests/               parser fixtures in the real API's XML format, analytics and
 
 ## Next steps
 
-- Run the LP on native 15-minute prices (hourly means understate the spread).
-- Add cross-border flows, TTF gas and EUA carbon prices as fundamentals.
-- Add intraday (continuous/IDA) and balancing/aFRR data for revenue stacking.
-- Extend to all Italian zones, the Nordics and CEE, and orchestrate daily refreshes with
-  Prefect into PostgreSQL.
+- **Calibrate the uncertainty bands** with conformal prediction, so the P10–P90 band actually
+  covers 80% of outcomes.
+- **Benchmark against LEAR** (Lago et al., 2021), the standard reference model for day-ahead
+  price forecasting, with a Diebold–Mariano test to show whether differences are significant.
+- **Add TTF gas and EUA carbon prices** as fundamentals.
+- **Run the LP on native 15-minute prices** (SDAC since October 2025). Hourly means understate
+  the spread.
+- **Measure coupling as price convergence** (share of hours with equal prices) rather than
+  correlation, which partly reflects shared fuel prices.
+- Add intraday and balancing/aFRR data for revenue stacking.
 
 ## Author
 

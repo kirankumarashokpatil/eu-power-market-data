@@ -58,6 +58,14 @@ class LightGBMQuantile:
     def predict(self, x: np.ndarray) -> Quantiles:
         return _sort_quantiles({q: np.asarray(m.predict(x)) for q, m in self.models.items()})
 
+    def contributions(self, x: np.ndarray, q: float = 0.5) -> np.ndarray:
+        """SHAP values (TreeSHAP, computed natively by LightGBM) for the ``q`` model.
+
+        Returns shape (rows, features + 1): each feature's push away from the average
+        forecast in EUR/MWh, with the average (base value) in the last column. A row
+        sums to that model's prediction."""
+        return np.asarray(self.models[q].predict(x, pred_contrib=True))
+
 
 class XGBoostQuantile:
     """One XGBoost model fitted to all quantiles at once (``reg:quantileerror``)."""

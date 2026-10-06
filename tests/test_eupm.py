@@ -229,3 +229,19 @@ def test_request_windows_follow_delivery_days():
     ]
     summer = _chunks(EntsoeConfig(start=date(2025, 7, 1), end=date(2025, 7, 1)))
     assert summer[0][0].hour == 22  # CEST is UTC+2
+
+
+def test_contributions_sum_to_the_forecast():
+    from eupm.config import ModelConfig
+    from eupm.models import LightGBMQuantile
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(300, 4))
+    y = 3 * x[:, 0] - 2 * x[:, 1] + rng.normal(0, 0.1, 300)
+    m = LightGBMQuantile(ModelConfig(n_estimators=50, quantiles=[0.5]))
+    m.fit(x, y)
+    contrib = m.contributions(x[:5])
+    assert contrib.shape == (5, 5)
+    np.testing.assert_allclose(contrib.sum(axis=1), m.models[0.5].predict(x[:5]), atol=1e-6)
+    # the two features that drive y matter more than the two noise features
+    assert np.abs(contrib[:, :2]).mean() > np.abs(contrib[:, 2:4]).mean()
